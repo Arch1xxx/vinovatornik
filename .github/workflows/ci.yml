@@ -1,25 +1,108 @@
-name: CI
+
+name: CI/CD
 
 on:
   push:
     branches: [main]
-  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vinovatornik-ci-cd
+  cancel-in-progress: false
+
+env:
+  APP_NAME: vinovatornik
+  DEMO_TEXT: "в меня врезался грузовик"
 
 jobs:
-  test:
-    # Сборка идёт на нашей машине, а не на серверах GitHub
+  build:
+    name: Build and Test
     runs-on: [self-hosted, macOS, ARM64, vinovatornik]
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Получение исходного кода
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-      - name: Версия Python
-        run: python3 --version
+      - name: Информация об агенте
+        run: |
+          hostname
+          uname -sm
+          python3 --version
 
-      - name: Установка зависимостей
-        run: python3 -m pip install -r requirements.txt
+      - name: Подготовка окружения
+        run: |
+          python3 -m venv .ci-venv
+          .ci-venv/bin/python -m pip install -r requirements.txt
 
-      - name: Тесты
-        run: python3 -m pytest -v
+      - name: Автоматическое тестирование
+        run: |
+          mkdir -p reports
+          .ci-venv/bin/python -m pytest -v --junitxml=reports/tests.xml
 
-      - name: Демо - проект действительно запускается
-        run: python3 -m vinovatornik "в меня врезался грузовик"
+      - name: Публикация отчёта тестирования
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: reports/tests.xml
+
+      - name: Демонстрационный запуск
+        run: |
+          .ci-venv/bin/python -m vinovatornik "$DEMO_TEXT"
+
+      - name: Формирование артефакта сборки
+        run: |
+          mkdir -p dist
+          tar --exclude=__pycache__ -czf "dist/$APP_NAME.tar.gz" \
+            vinovatornik requirements.txt README.md
+
+      - name: Публикация артефакта сборки
+        uses: actions/upload-artifact@v4
+        with:
+          name: vinovatornik-build
+          path: dist/vinovatornik.tar.gz
+
+  deploy:
+    name: Deploy and Verify
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, macOS, ARM64, vinovatornik]
+
+    steps:
+      - name: Загрузка артефакта сборки
+        uses: actions/download-artifact@v4
+        with:
+          name: vinovatornik-build
+          path: ${{ runner.temp }}/vinovatornik-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Локальное развёртывание
+        run: |
+          DEPLOY_DIR="$HOME/vinovatornik-deploy/releases/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          ARTIFACT_DIR="$RUNNER_TEMP/vinovatornik-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+
+          mkdir -p "$DEPLOY_DIR"
+          tar -xzf "$ARTIFACT_DIR/$APP_NAME.tar.gz" -C "$DEPLOY_DIR"
+
+          echo "DEPLOY_DIR=$DEPLOY_DIR" >> "$GITHUB_ENV"
+
+      - name: Проверка развёрнутого приложения
+        run: |
+          cd "$DEPLOY_DIR"
+          python3 -m vinovatornik --version
+          python3 -m vinovatornik "$DEMO_TEXT"
+          python3 -m vinovatornik --level 5 --json "сломался лифт"
+
+      - name: Активация новой версии
+        run: |
+          ln -sfn "$DEPLOY_DIR" "$HOME/vinovatornik-deploy/current"
+
+      - name: Результат развёртывания
+        run: |
+          echo "Развёртывание успешно завершено"
+          echo "Версия коммита: $GITHUB_SHA"
+          echo "Каталог: $DEPLOY_DIR"
