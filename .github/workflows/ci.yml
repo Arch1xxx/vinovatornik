@@ -8,7 +8,7 @@ on:
 jobs:
   test:
     # Сборка идёт на нашей машине, а не на серверах GitHub
-    runs-on: self-hosted
+    runs-on: [self-hosted, macOS, ARM64, vinovatornik]
     steps:
       - uses: actions/checkout@v4
 
